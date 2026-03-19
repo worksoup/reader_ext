@@ -23,28 +23,25 @@
 //! 提供只支持“重置到开头”（rewind）操作的 I/O trait 及其适配器。
 //!
 //! 标准库中的 [`Seek`] trait 要求实现者能够支持任意位置的定位（通过 [`SeekFrom`](std::io::SeekFrom)），
-//! 这对于某些流式 reader（如网络流、压缩流、加密流等）来说过于严格。它们通常只能
-//! 重置到初始状态，而无法高效地跳转到任意位置。
+//! 这对于某些流式 reader（如网络流、压缩流、加密流等）来说过于严格。它们通常只能重置到初始状态，而无法高效地跳转到任意位置。
 //!
-//! 本模块定义了 [`Rewind`] trait，它只要求实现 `try_rewind` 方法，明确表达了“只能重置”
-//! 的能力，避免与 `Seek` 的强契约产生冲突。同时为 [`Cursor`] 和任意 `Seek` 类型
-//! 提供了便捷的实现适配。
+//! 本模块定义了 [`Rewind`] trait, 它只要求实现 `try_rewind` 方法，明确表达了“只能重置”的能力，避免与 `Seek` 的强契约产生冲突。
+//! 同时为 [`Cursor`] 和任意 `Seek` 类型提供了便捷的实现适配。
 
 use std::io::{Cursor, Seek};
 
-/// 标记 trait，表示类型可以安全地进行“无条件重置”。
+/// 标记 trait, 表示类型可以安全地进行“无条件重置”。
 ///
-/// 当一个类型实现了 [`Rewind`] 且其 `try_rewind` 方法保证永不失败时，
-/// 可以实现此空 trait。这样，该类型就可以使用 [`Rewind::rewind`] 和
-/// [`Rewind::rebuild`] 这两个便捷方法，它们会直接 `unwrap` 结果，避免
-/// 不必要的 `Result` 处理。
+/// 当一个类型实现了 [`Rewind`] 且其 [`try_rewind`](Rewind::try_rewind) 方法保证永不失败时，
+/// 可以实现此标记 trait. 这样，该类型就可以使用 [`Rewind::rewind`] 和
+/// [`Rewind::rebuild`] 这两个便捷方法，它们会直接 `unwrap` 结果，避免不必要的 [`Result`] 处理。
 ///
-/// # 安全性
+/// # Safety
 ///
-/// 实现此 trait 的类型必须确保其 `try_rewind` 方法在所有情况下都成功，
-/// 不会返回 `Err`。如果违反了这一约定，调用 `rewind` 或 `rebuild` 将会 panic。
-pub trait RewindEasily {}
-/// 一个只能将 I/O 对象重置到开头（rewind）的 trait。
+/// 实现此 trait 的类型必须确保其 `try_rewind` 方法在所有情况下都成功，不会返回 `Err`.
+/// 如果违反了这一约定，调用 `rewind` 或 `rebuild` 将会造成未定义行为（在 `Err` 上调用 [`unwrap_unchecked`](Result::unwrap_unchecked)）。
+pub unsafe trait RewindEasily {}
+/// 一个只能将 I/O 对象重置到开头（rewind）的 trait.
 ///
 /// 该 trait 与 [`Seek`] 不同，它不承诺任意跳转的能力，只要求实现 `try_rewind` 方法，
 /// 将内部指针或状态重置到初始位置（相当于 [`SeekFrom::Start(0)`](std::io::SeekFrom)）。
@@ -96,48 +93,48 @@ pub trait Rewind {
     /// 重置当前 I/O 对象到初始位置。
     ///
     /// 该方法的行为应与 `Seek::seek(SeekFrom::Start(0))` 一致，但只要求支持
-    /// 重置操作，不要求支持任意 seek。
+    /// 重置操作，不要求支持任意 seek.
     ///
     /// # 错误
     ///
     /// 如果重置操作失败（例如底层 reader 不可重置），则应返回一个 I/O 错误。
     fn try_rewind(&mut self) -> std::io::Result<()>;
 
-    /// 重置当前 I/O 对象到初始位置，如果失败则 panic。
+    /// 重置当前 I/O 对象到初始位置，如果失败则 panic.
     ///
-    /// 此方法仅在 `Self` 同时实现了 [`RewindEasily`] 时可用，因为只有
-    /// 保证 `try_rewind` 永不失败的类型才能安全地调用此方法而不处理错误。
+    /// 此方法仅在 `Self` 同时实现了 [`RewindEasily`] 时可用，因为只有保证 `try_rewind` 永不失败的类型才能安全地调用此方法而不处理错误。
     ///
-    /// # Panics
+    /// # Safety
     ///
-    /// 如果内部的 `try_rewind` 返回错误，此方法将 panic。
+    /// 此方法使用 [`unwrap_unchecked`](Result::unwrap_unchecked) 处理内部 `try_rewind` 的返回值。
     #[inline]
     fn rewind(&mut self)
     where
         Self: RewindEasily,
     {
-        self.try_rewind().unwrap();
+        // SAFETY: 由 `RewindEasily` 实施者保证。
+        unsafe { self.try_rewind().unwrap_unchecked() };
     }
 
-    /// 消费当前对象，返回一个重置到开头的对象，如果失败则 panic。
+    /// 消费当前对象，返回一个重置到开头的对象，如果失败则 panic.
     ///
-    /// 此方法仅在 `Self` 同时实现了 [`RewindEasily`] 时可用，它先调用
-    /// [`try_rewind`](Self::try_rewind) 重置，然后返回自身。由于 `Self`
-    /// 保证重置永远不会失败，因此可以直接 `unwrap`。
+    /// 此方法仅在 `Self` 实现了 [`RewindEasily`] 时可用，它调用 [`try_rebuild`](Self::try_rebuild) 重置，
+    /// 由于 `Self` 保证重置永远不会失败，使用 `unwrap_unchecked` 处理，返回自身。
     ///
-    /// # Panics
+    /// # Safety
     ///
-    /// 如果内部的 `try_rewind` 返回错误，此方法将 panic。
+    /// 此方法使用 [`unwrap_unchecked`](Result::unwrap_unchecked) 处理内部 `try_rewind` 的返回值。
     #[inline]
     fn rebuild(self) -> Self
     where
         Self: RewindEasily + Sized,
     {
-        self.try_rebuild().unwrap()
+        // SAFETY: 由 `RewindEasily` 实施者保证。
+        unsafe { self.try_rebuild().unwrap_unchecked() }
     }
 }
 
-/// 为 [`Cursor`] 实现 [`Rewind`] trait。
+/// 为 [`Cursor`] 实现 [`Rewind`] trait.
 impl<T> Rewind for Cursor<T>
 where
     T: AsRef<[u8]>,
@@ -148,7 +145,7 @@ where
     }
 }
 
-/// 一个包装器，为任何实现了 [`Seek`] 的类型实现 [`Rewind`] trait。
+/// 一个包装器，为任何实现了 [`Seek`] 的类型实现 [`Rewind`] trait.
 ///
 /// 注意：此包装器仅将 `try_rewind` 转发给内部的 [`Seek::rewind`] 方法，因此它要求
 /// 内部的 [`Seek`] 实现确实支持重置到开头。如果内部的 `Seek` 实现不支持（例如
