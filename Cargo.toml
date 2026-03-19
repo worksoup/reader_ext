@@ -34,4 +34,7 @@ homepage = "https://github.com/worksoup/reader_ext"
 documentation = "http://docs.rs/reader_ext"
 repository = "https://github.com/worksoup/reader_ext"
 
+[features]
+unstable = []
+
 [dependencies]

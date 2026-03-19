@@ -22,13 +22,17 @@
 
 //! 提供只支持“重置到开头”（rewind）操作的 I/O trait 及其适配器。
 //!
-//! 标准库中的 [`Seek`] trait 要求实现者能够支持任意位置的定位（通过 [`SeekFrom`](std::io::SeekFrom)），
+//! 标准库中的 [`Seek`] trait 的 API 暗示了实现者须支持任意位置的定位（通过 [`SeekFrom`](std::io::SeekFrom)），
 //! 这对于某些流式 reader（如网络流、压缩流、加密流等）来说过于严格。它们通常只能重置到初始状态，而无法高效地跳转到任意位置。
 //!
-//! 本模块定义了 [`Rewind`] trait, 它只要求实现 `try_rewind` 方法，明确表达了“只能重置”的能力，避免与 `Seek` 的强契约产生冲突。
+//! 本模块定义了 [`Rewind`] trait, 它只要求实现 `try_rewind` 方法，明确表达了“只能重置”的能力，避免造成使用者的困惑。
 //! 同时为 [`Cursor`] 和任意 `Seek` 类型提供了便捷的实现适配。
 
-use std::io::{Cursor, Seek};
+use std::{
+    fs::File,
+    io::{BufReader, Cursor, Seek},
+    sync::Arc,
+};
 
 /// 标记 trait, 表示类型可以安全地进行“无条件重置”。
 ///
@@ -40,7 +44,15 @@ use std::io::{Cursor, Seek};
 ///
 /// 实现此 trait 的类型必须确保其 `try_rewind` 方法在所有情况下都成功，不会返回 `Err`.
 /// 如果违反了这一约定，调用 `rewind` 或 `rebuild` 将会造成未定义行为（在 `Err` 上调用 [`unwrap_unchecked`](Result::unwrap_unchecked)）。
-pub unsafe trait RewindEasily {}
+pub unsafe trait RewindEasily: Rewind {}
+/// 标记 trait, 表示类型实现 [`Rewind`] 时，内部将实现转发给了 [`Seek::seek`].
+///
+/// 用于为 [`RewindEasily`] 提供更强的保证。即保证 seek 到 0 位置是无错误的。
+///
+/// # Safety
+///
+/// 实现此 trait 的类型必须确保其 `try_rewind` 方法将实现转发给了 [`Seek::seek`].
+pub unsafe trait RewindIsSeekToStart0: RewindEasily + Seek {}
 /// 一个只能将 I/O 对象重置到开头（rewind）的 trait.
 ///
 /// 该 trait 与 [`Seek`] 不同，它不承诺任意跳转的能力，只要求实现 `try_rewind` 方法，
@@ -134,6 +146,42 @@ pub trait Rewind {
     }
 }
 
+/// 为 [`File`] 实现 [`Rewind`] trait.
+impl Rewind for File {
+    #[inline]
+    fn try_rewind(&mut self) -> std::io::Result<()> {
+        Seek::rewind(self)
+    }
+}
+/// 为 [`File`] 实现 [`Rewind`] trait.
+impl Rewind for &File {
+    #[inline]
+    fn try_rewind(&mut self) -> std::io::Result<()> {
+        Seek::rewind(self)
+    }
+}
+/// 为 [`File`] 实现 [`Rewind`] trait.
+impl Rewind for Arc<File> {
+    #[inline]
+    fn try_rewind(&mut self) -> std::io::Result<()> {
+        Seek::rewind(self)
+    }
+}
+// SAFETY: 当 `R` 为 `RewindIsSeekToStart0`, 说明 seek 到 0 是无错误的。此时 `BufReader` seek 到 0 位置也是无错误的。
+unsafe impl<R: RewindIsSeekToStart0 + ?Sized> RewindEasily for BufReader<R> {}
+// SAFETY: 同 `RewindEasily` 实现说明。
+unsafe impl<R: RewindIsSeekToStart0 + ?Sized> RewindIsSeekToStart0 for BufReader<R> {}
+/// 为 [`Cursor`] 实现 [`Rewind`] trait.
+impl<R: Seek + ?Sized> Rewind for BufReader<R> {
+    #[inline]
+    fn try_rewind(&mut self) -> std::io::Result<()> {
+        Seek::rewind(self)
+    }
+}
+// SAFETY: `Cursor` 的内部实现中，seek 到 0 位置是无错误的。
+unsafe impl<T> RewindEasily for Cursor<T> where T: AsRef<[u8]> {}
+// SAFETY: 同 `RewindEasily` 实现说明。
+unsafe impl<T> RewindIsSeekToStart0 for Cursor<T> where T: AsRef<[u8]> {}
 /// 为 [`Cursor`] 实现 [`Rewind`] trait.
 impl<T> Rewind for Cursor<T>
 where
@@ -142,6 +190,36 @@ where
     #[inline]
     fn try_rewind(&mut self) -> std::io::Result<()> {
         Seek::rewind(self)
+    }
+}
+// SAFETY: `&mut T` 实现的 Rewind 转发给了 `T`, 故 `T` 为 `RewindEasily` 时，`&mut T` 也应为 `RewindEasily`.
+unsafe impl<T: RewindEasily + ?Sized> RewindEasily for &mut T {}
+// SAFETY: 同 `RewindEasily` 实现说明。
+unsafe impl<T: RewindIsSeekToStart0 + ?Sized> RewindIsSeekToStart0 for &mut T {}
+impl<T: Rewind + ?Sized> Rewind for &mut T {
+    #[inline]
+    fn try_rewind(&mut self) -> std::io::Result<()> {
+        (**self).try_rewind()
+    }
+}
+// SAFETY: `Box<T>` 实现的 Rewind 转发给了 `T`, 故 `T` 为 `RewindEasily` 时，`Box<T>` 也应为 `RewindEasily`.
+unsafe impl<T: RewindEasily + ?Sized> RewindEasily for Box<T> {}
+// SAFETY: 同 `RewindEasily` 实现说明。
+unsafe impl<T: RewindIsSeekToStart0 + ?Sized> RewindIsSeekToStart0 for Box<T> {}
+impl<T: Rewind + ?Sized> Rewind for Box<T> {
+    #[inline]
+    fn try_rewind(&mut self) -> std::io::Result<()> {
+        (**self).try_rewind()
+    }
+}
+// SAFETY: `std::io::Empty` 的 seek 是零操作，永不发生错误。
+unsafe impl RewindEasily for std::io::Empty {}
+// SAFETY: 同 `RewindEasily` 实现说明。
+unsafe impl RewindIsSeekToStart0 for std::io::Empty {}
+impl Rewind for std::io::Empty {
+    fn try_rewind(&mut self) -> std::io::Result<()> {
+        // `std::io::Empty` 的 seek 是零操作。
+        Ok(())
     }
 }
 
@@ -164,11 +242,42 @@ where
 /// let rewinder = Rewinder(cursor);  // 包装成 Rewind
 /// // 现在可以调用 rewinder.try_rewind() 或 rewinder.try_rebuild()
 /// ```
-pub struct Rewinder<T: Seek + ?Sized>(pub T);
+pub struct Rewinder<R: Seek + ?Sized>(pub R);
 
-impl<T: Seek + ?Sized> Rewind for Rewinder<T> {
+// SAFETY: 同 `BufRead` 实现。
+unsafe impl<R: RewindIsSeekToStart0 + ?Sized> RewindEasily for Rewinder<R> {}
+// SAFETY: 同 `RewindEasily` 实现说明。
+unsafe impl<R: RewindIsSeekToStart0 + ?Sized> RewindIsSeekToStart0 for Rewinder<R> {}
+impl<R: Seek + ?Sized> Rewind for Rewinder<R> {
     #[inline]
     fn try_rewind(&mut self) -> std::io::Result<()> {
         self.0.rewind()
+    }
+}
+impl<R: Seek + ?Sized> Seek for Rewinder<R> {
+    #[inline]
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+
+    #[inline]
+    fn rewind(&mut self) -> std::io::Result<()> {
+        self.0.rewind()
+    }
+
+    #[inline]
+    #[cfg(feature = "unstable")]
+    fn stream_len(&mut self) -> std::io::Result<u64> {
+        self.0.stream_len()
+    }
+
+    #[inline]
+    fn stream_position(&mut self) -> std::io::Result<u64> {
+        self.0.stream_position()
+    }
+
+    #[inline]
+    fn seek_relative(&mut self, offset: i64) -> std::io::Result<()> {
+        self.0.seek_relative(offset)
     }
 }
