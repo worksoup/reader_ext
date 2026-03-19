@@ -164,20 +164,12 @@ where
 /// use reader_ext::{Rewind, Rewinder};
 ///
 /// let cursor = Cursor::new(vec![1, 2, 3]);
-/// let rewinder = Rewinder::new(cursor);  // 包装成 Rewind
+/// let rewinder = Rewinder(cursor);  // 包装成 Rewind
 /// // 现在可以调用 rewinder.try_rewind() 或 rewinder.try_rebuild()
 /// ```
-pub struct Rewinder<T: Seek>(T);
+pub struct Rewinder<T: Seek + ?Sized>(pub T);
 
-impl<T: Seek> Rewinder<T> {
-    /// 创建一个新的 [`Rewinder`]，包装给定的实现了 [`Seek`] 的对象。
-    #[inline]
-    pub fn new(inner: T) -> Self {
-        Rewinder(inner)
-    }
-}
-
-impl<T: Seek> Rewind for Rewinder<T> {
+impl<T: Seek + ?Sized> Rewind for Rewinder<T> {
     #[inline]
     fn try_rewind(&mut self) -> std::io::Result<()> {
         self.0.rewind()
